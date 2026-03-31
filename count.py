@@ -25,7 +25,6 @@ except ImportError as import_error:
         "Install it with: python -m pip install ultralytics"
     ) from import_error
 
-
 def load_model(conf_threshold: float = 0.35) -> YOLO:
 
     print("[*] Loading YOLO model...")
@@ -58,7 +57,6 @@ def count_sheep(image_path: str, model: YOLO) -> dict:
     prediction_results = model.predict(
         source=str(path),
         conf=conf_threshold,
-        classes=[18],
         verbose=False,
     )
     result = prediction_results[0]
@@ -76,7 +74,6 @@ def count_sheep(image_path: str, model: YOLO) -> dict:
             print(f"{index+1:<5} {confidence:>11.2%}  ({int(x1)}, {int(y1)}, {int(x2)}, {int(y2)})")
 
     return {"count": sheep_count, "results": result, "image_path": str(path)}
-
 
 def annotate_and_show(result: dict, save: bool = True) -> None:
     """
@@ -123,7 +120,7 @@ def count_sheep_in_image(image_path: str, conf_threshold: float = 0.35) -> int:
     """
     model = load_model(conf_threshold)
     result = count_sheep(image_path, model)
-    return result["count"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +141,7 @@ def parse_args() -> argparse.Namespace:
         help="Display the annotated image in a window after inference."
     )
     parser.add_argument(
-        "--save", action="store_true", default=True,
+        "--save", action="store_true", default=False,
         help="Save the annotated image (default: True)."
     )
     return parser.parse_args()
