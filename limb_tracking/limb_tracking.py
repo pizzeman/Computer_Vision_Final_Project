@@ -195,37 +195,37 @@ LR         = 1e-3
 # Medium            : [48,  96,  192, 384]  ~  2.7M params
 # Large  (HRNet-W48): [48,  96,  192, 384] with more blocks — increase HRNET_BLOCKS
 # Increasing channels has the biggest impact on accuracy and memory usage.
-HRNET_CHANNELS = [48,  96,  192, 384]
+HRNET_CHANNELS = [32, 64, 128, 256]
 
 # Number of BasicBlocks in each HRNet branch (default 4 per branch).
 # More blocks = deeper network, slower training, potentially better accuracy.
 # Range: 2 (very fast) to 8 (close to published HRNet depth)
-HRNET_BLOCKS = 6
+HRNET_BLOCKS = 4
 
 # ViTPose: transformer embedding dimension.
 # Must be divisible by VITPOSE_HEADS.
 # Small  (default) : 384  dim, 6  heads  ~  6M  params
 # Medium           : 512  dim, 8  heads  ~  10M params
 # Large  (ViT-B)   : 768  dim, 12 heads  ~  22M params
-VITPOSE_DIM   = 512
-VITPOSE_HEADS = 8
+VITPOSE_DIM   = 384
+VITPOSE_HEADS = 6
 
 # Number of transformer blocks in ViTPose.
 # Default 6. Published ViTPose-B uses 12.
 # More blocks = more capacity but slower and more memory.
 # Range: 2 (tiny/fast) to 12 (full ViT-Base depth)
-VITPOSE_DEPTH = 8
+VITPOSE_DEPTH = 6
 
 # DEKR: base channel width of the backbone.
 # The backbone goes: 3->BASE, BASE->BASE*2, then residual blocks at BASE*2 and BASE*4.
 # Default  (small)  : 64   ~  1.5M params
 # Medium            : 96   ~  3.3M params
 # Large             : 128  ~  5.8M params (close to published DEKR with ResNet-50)
-DEKR_BASE_CHANNELS = 96
+DEKR_BASE_CHANNELS = 64
 
 # Number of ResBlocks at each stage of the DEKR backbone (default 2 per stage).
 # Range: 1 (very fast) to 4 (deeper backbone)
-DEKR_BLOCKS = 3
+DEKR_BLOCKS = 2
 
 # ---------------------------------------------------------------------------
 # Device — auto-detects GPU
@@ -247,21 +247,36 @@ def _load_json(path: str):
         return json.load(f)
 
 
-def _build_samples(coco: dict, image_base: Path, source_label: str = "") -> List[dict]:
+def _build_samples(
+    coco: dict,
+    image_base: Path,
+    source_label: str = "",
+    species_filter: Optional[List[str]] = None,
+) -> List[dict]:
     """
     Parse an Animal Kingdom COCO-format annotation dict into sample dicts.
 
     Expected format:
       {
         "images":      [{"id": 0, "file_name": "VIDEOID/VIDEOID_fXXXXXX.jpg", ...}, ...],
-        "annotations": [{"image_id": 0, "keypoints": [x,y,v,...], "bbox": [x,y,w,h], ...}, ...]
+        "annotations": [{"image_id": 0, "keypoints": [x,y,v,...], "bbox": [x,y,w,h],
+                         "category_id": N, ...}, ...],
+        "categories":  [{"id": N, "name": "horse", ...}, ...]
       }
 
-    file_name already contains the subfolder, e.g. "AAJYPNPL/AAJYPNPL_f000011.jpg",
-    so we resolve it directly as <image_base>/<file_name>.
+    species_filter : optional list of species name strings to keep, e.g.
+                     ["horse", "lion", "frog"].  Matching is case-insensitive
+                     and substring-based, so "cat" matches "cat", "wildcat" etc.
+                     If None or empty, all species are included.
     """
     # Build id -> image info lookup
     id2info: Dict[int, dict] = {img["id"]: img for img in coco["images"]}
+
+    # Normalise species filter to lowercase for case-insensitive matching
+    species_lower: Optional[List[str]] = (
+        [s.lower() for s in species_filter]
+        if species_filter else None
+    )
 
     samples = []
     skipped_reasons: Dict[str, int] = {}
@@ -269,8 +284,29 @@ def _build_samples(coco: dict, image_base: Path, source_label: str = "") -> List
     def _skip(reason: str):
         skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
 
+    # Pre-collect all animal names present for informative warnings
+    if species_lower:
+        all_animals = sorted({
+            ann.get("animal", "").lower()
+            for ann in coco.get("annotations", [])
+            if ann.get("animal")
+        })
+        matched_animals = [a for a in all_animals
+                           if any(f in a for f in species_lower)]
+        if not matched_animals:
+            print(f"  WARNING [{source_label}]: no animals matched {species_filter}. "
+                  f"Animals in this split: {all_animals}")
+        else:
+            print(f"  [{source_label}] Filtering to animals: {matched_animals}")
+
     for ann in coco.get("annotations", []):
-        # Image path
+        # ── Species filter — match against "animal" field on annotation ─────
+        if species_lower:
+            animal_name = ann.get("animal", "").lower()
+            if not any(f in animal_name for f in species_lower):
+                continue   # silently skip — filtered, not malformed
+
+        # ── Image path ──────────────────────────────────────────────────────
         img_info = id2info.get(ann.get("image_id"))
         if img_info is None:
             _skip("image_id not found"); continue
@@ -282,7 +318,7 @@ def _build_samples(coco: dict, image_base: Path, source_label: str = "") -> List
         if not img_path.exists():
             _skip("image file missing"); continue
 
-        # Keypoints — COCO flat format: [x, y, v, x, y, v, ...] length = NUM_JOINTS * 3
+        # ── Keypoints — COCO flat format [x, y, v, ...] ────────────────────
         raw_kps = ann.get("keypoints", [])
         if not raw_kps:
             _skip("no keypoints"); continue
@@ -290,7 +326,7 @@ def _build_samples(coco: dict, image_base: Path, source_label: str = "") -> List
         if kps.shape[0] != NUM_JOINTS:
             _skip(f"wrong joint count ({kps.shape[0]})"); continue
 
-        # Bounding box — AK COCO uses [x, y, w, h]
+        # ── Bounding box [x, y, w, h] ───────────────────────────────────────
         bbox = ann.get("bbox")
         if bbox is None or len(bbox) != 4:
             _skip("missing bbox"); continue
@@ -299,6 +335,7 @@ def _build_samples(coco: dict, image_base: Path, source_label: str = "") -> List
             img_path=str(img_path),
             keypoints=kps,
             bbox=list(bbox),
+            animal=ann.get("animal", "Unknown"),
         ))
 
     total_skipped = sum(skipped_reasons.values())
@@ -327,9 +364,11 @@ class AnimalKingdomDataset(Dataset):
     label      : human-readable label used in progress messages
     """
 
-    def __init__(self, ann_file: str, image_base: str, label: str = "", transform=None):
+    def __init__(self, ann_file: str, image_base: str, label: str = "",
+                 species_filter: Optional[List[str]] = None, transform=None):
         coco = _load_json(ann_file)
-        self.samples   = _build_samples(coco, Path(image_base), label)
+        self.samples   = _build_samples(coco, Path(image_base), label,
+                                        species_filter=species_filter)
         self.transform = transform or _default_transform()
         print(f"  [{label or Path(ann_file).parent.name}] "
               f"{len(self.samples)} samples loaded from {Path(ann_file).name}")
@@ -361,12 +400,14 @@ class AnimalKingdomDataset(Dataset):
 
         heatmaps   = generate_heatmaps(kps, HEATMAP_SIZE, SIGMA)
         tensor_img = self.transform(crop_resized)
-        return tensor_img, torch.from_numpy(heatmaps), torch.from_numpy(kps)
+        # animal is a plain string — DataLoader collates these into a list of strings
+        return tensor_img, torch.from_numpy(heatmaps), torch.from_numpy(kps), s["animal"]
 
 
 def build_datasets(
     data_root: str,
     ann_dir_names: List[str],
+    species_filter: Optional[List[str]] = None,
 ) -> Tuple[Dataset, Dataset]:
     """
     Build combined train and test datasets from one or more annotation dirs.
@@ -377,9 +418,13 @@ def build_datasets(
 
     Parameters
     ----------
-    data_root     : root folder that contains both annotations/ and images/
-    ann_dir_names : list of annotation subdirectory names to include,
-                    e.g. ["ak_P3_mammal", "ak_P3_bird"] or all of ALL_ANN_DIRS
+    data_root      : root folder that contains both annotations/ and images/
+    ann_dir_names  : list of annotation subdirectory names to include,
+                     e.g. ["ak_P3_mammal", "ak_P3_bird"] or all of ALL_ANN_DIRS
+    species_filter : optional list of species names to keep, e.g.
+                     ["horse", "lion"].  Case-insensitive substring match
+                     against the category name in the annotation JSON.
+                     None means keep all species.
     """
     data_root  = Path(data_root)
     image_base = str(data_root / "images")
@@ -405,12 +450,14 @@ def build_datasets(
         if not Path(train_ann).exists():
             print(f"  WARNING: {train_ann} not found — skipping {name} train split.")
         else:
-            train_datasets.append(AnimalKingdomDataset(train_ann, image_base, label=name))
+            train_datasets.append(AnimalKingdomDataset(
+                train_ann, image_base, label=name, species_filter=species_filter))
 
         if not Path(test_ann).exists():
             print(f"  WARNING: {test_ann} not found — skipping {name} test split.")
         else:
-            test_datasets.append(AnimalKingdomDataset(test_ann, image_base, label=name))
+            test_datasets.append(AnimalKingdomDataset(
+                test_ann, image_base, label=name, species_filter=species_filter))
 
     if not train_datasets:
         raise RuntimeError("No valid training annotation files found.")
@@ -722,7 +769,8 @@ def run_epoch(model_name, model, loader, criterion, optimizer, device):
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
-        for imgs, hm_gt, kps in loader:
+        for imgs, hm_gt, kps, animals in loader:
+            # animals is a list of strings e.g. ["Horse", "Lion", "Frog", ...]
             imgs, hm_gt = imgs.to(device), hm_gt.to(device)
             vis = (kps[:, :, 2] > 0).to(device)
 
@@ -854,7 +902,7 @@ def _plot_confusion(model_name, model, test_loader, device, out_dir):
     conf = np.zeros((NUM_JOINTS, NUM_JOINTS), dtype=np.int64)
     model.eval()
     with torch.no_grad():
-        for imgs, hm_gt, kps in test_loader:
+        for imgs, hm_gt, kps, animals in test_loader:
             hm_pred = _forward(model_name, model, imgs.to(device))
             conf   += compute_per_joint_confusion(hm_pred.cpu().numpy(), kps.numpy())
 
@@ -1004,6 +1052,18 @@ def parse_args():
     )
     p.add_argument("--models", nargs="+", default=["hrnet", "vitpose", "dekr"],
                    choices=["hrnet", "vitpose", "dekr"])
+    p.add_argument(
+        "--species", nargs="+", default=None,
+        metavar="SPECIES",
+        help=(
+            "Filter to specific species (case-insensitive substring match).\n"
+            "Examples:\n"
+            "  --species horse\n"
+            "  --species horse lion frog crab\n"
+            "  --species cat   (matches 'cat', 'wildcat', 'catfish', etc.)\n"
+            "Omit to train on all species."
+        ),
+    )
     p.add_argument("--epochs",      type=int,   default=EPOCHS)
     p.add_argument("--batch_size",  type=int,   default=BATCH_SIZE)
     p.add_argument("--lr",          type=float, default=LR)
@@ -1034,14 +1094,17 @@ def main():
         return
 
     ann_dir_names = _resolve_ann_dirs(args.data_root, args.ann_dirs)
+    species = args.species or None
 
     print(f"\nDevice          : {DEVICE}")
     print(f"Annotation dirs : {ann_dir_names}")
+    print(f"Species filter  : {species if species else 'all'}")
     print(f"Models          : {args.models}")
     print(f"Epochs          : {args.epochs}")
     print(f"Batch size      : {args.batch_size}\n")
 
-    train_ds, test_ds = build_datasets(args.data_root, ann_dir_names)
+    train_ds, test_ds = build_datasets(args.data_root, ann_dir_names,
+                                       species_filter=species)
 
     train_dl = DataLoader(train_ds, args.batch_size, shuffle=True,
                           num_workers=args.num_workers,
