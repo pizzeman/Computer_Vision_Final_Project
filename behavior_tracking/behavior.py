@@ -221,9 +221,9 @@ def run():
     train_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in train_video_ids]
     validation_test_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in validation_test_video_ids]
     test_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in test_video_ids]
-
-    train_vidoes_as_limbs = [(run_limb_tracking(frame_paths, animal), animal, behavior) for frame_paths, animal, behavior in train_video_as_frames]
-    validation_test_videos_as_limbs = [(run_limb_tracking(frame_paths, animal), animal, behavior) for frame_paths, animal, behavior in validation_test_video_as_frames]
+    train_vidoes_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in train_video_as_frames]
+    validation_test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in validation_test_video_as_frames]
+    test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames]_test_video_as_frames]
     test_videos_as_limbs = [(run_limb_tracking(frame_paths, animal), animal, behavior) for frame_paths, animal, behavior in test_video_as_frames]
 
     train_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in train_vidoes_as_limbs]
