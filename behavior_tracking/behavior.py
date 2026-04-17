@@ -1,5 +1,5 @@
 import os
-from time import time
+import time
 import numpy as np
 import pandas as pd
 import ast
@@ -68,7 +68,18 @@ def get_video_frames(video_id: str) -> list:
 
 def run_limb_tracking(frame_paths: list, animal: str) -> np.ndarray:
     # array dims: (T, L, 2) where T is number of frames, L is number of limbs, and 2 is (x,y) coordinates
-    pass
+    out = list()
+    for frame_path in frame_paths:
+        poses = limb_tracking.infer(
+            model_name="hrnet",
+            checkpoint="limb_tracking/results/hrnet_best.pth",
+            image_path=frame_path,
+        )
+        poses = np.array(poses)
+        out.append(poses)
+
+    out = np.array(out)
+    return out
 
 def normalize_frames(frames: np.ndarray, animal: str, behavior: str) -> np.ndarray:
     # normalize the number of frames to FRAMES_PER_VIDEO by sampling or padding
@@ -105,7 +116,8 @@ def normalize_frames(frames: np.ndarray, animal: str, behavior: str) -> np.ndarr
     behavior_onehot = list_to_onehot(BEHAVIORS, behavior)  # (len(BEHAVIORS),)
     onehot = np.concatenate([animal_onehot, behavior_onehot])  # (len(ANIMALS) + len(BEHAVIORS),)
     onehot = np.tile(onehot, (frames.shape[0], 1))  # (T, len(ANIMALS) + len(BEHAVIORS))
-    frames = np.concatenate([frames, onehot[:, None, :]], axis=2)  # (T, L, 4 + len(ANIMALS) + len(BEHAVIORS)) after appending metadata
+    onehot = np.repeat(onehot[:, None, :], frames.shape[1], axis=1)  # (T, L, len(ANIMALS) + len(BEHAVIORS))
+    frames = np.concatenate([frames, onehot], axis=2)  # (T, L, 4 + len(ANIMALS) + len(BEHAVIORS)) after appending metadata
 
     return frames
 
@@ -118,6 +130,11 @@ def list_to_onehot(l: list, item: str) -> np.ndarray:
     else:
         raise ValueError(f"Item '{item}' not found in list {l}")
     return onehot
+
+
+def flatten_frame_features(frames: np.ndarray) -> np.ndarray:
+    # reshape from (T, L, F) to (T, L*F) so BehaviorCNN receives 3D batches (B, T, F_total)
+    return frames.reshape(frames.shape[0], -1)
 
 
 
@@ -160,7 +177,8 @@ def get_device():
 
 def train_model(train_data: list, validation_data: list):
     device = get_device()
-    model = BehaviorCNN(input_dim=4 + len(ANIMALS) + len(BEHAVIORS), num_classes=len(BEHAVIORS)).to(device)
+    input_dim = train_data[0][0].shape[1]
+    model = BehaviorCNN(input_dim=input_dim, num_classes=len(BEHAVIORS)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
 
@@ -174,8 +192,8 @@ def train_model(train_data: list, validation_data: list):
             frames_batch = [item[0] for item in batch]
             labels_batch = [item[2] for item in batch]
 
-            frames_tensor = torch.tensor(frames_batch, dtype=torch.float32).to(device)  # (batch, T, L, F)
-            labels_tensor = torch.tensor(labels_batch, dtype=torch.long).to(device)     # (batch, num_classes)
+            frames_tensor = torch.tensor(frames_batch, dtype=torch.float32).to(device)  # (batch, T, F_total)
+            labels_tensor = torch.tensor(labels_batch, dtype=torch.long).to(device)     # (batch,) class indices
 
             outputs = model(frames_tensor)  # (batch, num_classes)
             loss = criterion(outputs, labels_tensor)
@@ -183,14 +201,14 @@ def train_model(train_data: list, validation_data: list):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_acc_history.append((outputs.argmax(dim=1) == labels_tensor.argmax(dim=1)).float().mean().item())
+            train_acc_history.append((outputs.argmax(dim=1) == labels_tensor).float().mean().item())
 
         with torch.no_grad():
             model.eval()
             val_frames = torch.tensor([item[0] for item in validation_data], dtype=torch.float32).to(device)
             val_labels = torch.tensor([item[2] for item in validation_data], dtype=torch.long).to(device)
             val_outputs = model(val_frames)
-            val_acc = (val_outputs.argmax(dim=1) == val_labels.argmax(dim=1)).float().mean().item()
+            val_acc = (val_outputs.argmax(dim=1) == val_labels).float().mean().item()
             val_acc_history.append(val_acc)
 
     results = {
@@ -201,14 +219,14 @@ def train_model(train_data: list, validation_data: list):
     return model, results
 
 def test_model(model, test_data: list) -> dict:
-    # test_data is a list of (frames, label) where frames is (T, L, 4) and label is one-hot vector
+    # test_data is a list of (features, animal, label_idx) where features is (T, F_total) and label_idx is an int
     device = get_device()
     model.eval()
     with torch.no_grad():
         test_frames = torch.tensor([item[0] for item in test_data], dtype=torch.float32).to(device)
         test_labels = torch.tensor([item[2] for item in test_data], dtype=torch.long).to(device)
         test_outputs = model(test_frames)
-        test_acc = (test_outputs.argmax(dim=1) == test_labels.argmax(dim=1)).float().mean().item()
+        test_acc = (test_outputs.argmax(dim=1) == test_labels).float().mean().item()
 
     return {"test_acc": test_acc}
 
@@ -223,22 +241,40 @@ def run():
     test_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in test_video_ids]
     train_vidoes_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in train_video_as_frames]
     validation_test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in validation_test_video_as_frames]
-    test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames]_test_video_as_frames]
+    test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames]
     test_videos_as_limbs = [(run_limb_tracking(frame_paths, animal), animal, behavior) for frame_paths, animal, behavior in test_video_as_frames]
 
     train_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in train_vidoes_as_limbs]
     validation_test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in validation_test_videos_as_limbs]
     test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in test_videos_as_limbs]
 
+    train_videos_features = [flatten_frame_features(frames) for frames in train_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
+    validation_videos_features = [flatten_frame_features(frames) for frames in validation_test_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
+    test_videos_features = [flatten_frame_features(frames) for frames in test_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
+
+    # Build canonical supervised samples: (features, animal, behavior_class_index).
+    train_data = [
+        (frames, animal, BEHAVIORS.index(behavior))
+        for frames, (_, animal, behavior) in zip(train_videos_features, train_vidoes_as_limbs)
+    ]
+    validation_data = [
+        (frames, animal, BEHAVIORS.index(behavior))
+        for frames, (_, animal, behavior) in zip(validation_videos_features, validation_test_videos_as_limbs)
+    ]
+    test_data = [
+        (frames, animal, BEHAVIORS.index(behavior))
+        for frames, (_, animal, behavior) in zip(test_videos_features, test_videos_as_limbs)
+    ]
+
     print(f"Data preprocessing and limb tracking done at {time() - start:.2f} seconds")
 
     # train the model 
-    model, train_results = train_model(train_videos_normalized, validation_test_videos_normalized)
+    model, train_results = train_model(train_data, validation_data)
     print(train_results)
     print(f"Model training done at {time() - start:.2f} seconds")
 
     # evaluate the model
-    test_results = test_model(model, test_videos_normalized)
+    test_results = test_model(model, test_data)
     print(test_results)
     print(f"Model testing done at {time() - start:.2f} seconds")
 
