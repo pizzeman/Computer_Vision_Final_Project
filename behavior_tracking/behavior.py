@@ -1,5 +1,6 @@
 import os
-import time
+from time import time
+import pickle
 import numpy as np
 import pandas as pd
 import ast
@@ -7,12 +8,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import limb_tracking
+from limb_tracking.limb_tracking import infer
 
-METADATA_FILENAME = "AR_metadata.xlsx"
-VIDEO_DIRECTORY = "TODO"
-ANIMALS = ["horse"]
-BEHAVIORS = ["running"]
+METADATA_FILENAME = "/Users/cwise/Downloads/AR_metadata.xlsx"
+VIDEO_DIRECTORY = "/Users/cwise/Downloads/image"
+ANIMALS = ["horse", "frog", "lion", "common crane"]
+BEHAVIORS = ["running", "fighting", "drinking", "sleeping", "playing"]
 VALIDATION_RATIO = 0.1
 TEST_RATIO = 0.2
 FRAME_SIZE = (224, 224)
@@ -20,10 +21,45 @@ FRAMES_PER_VIDEO = 16
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 32
 EPOCHS = 20
+NUM_LIMBS = 23
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
+USE_CACHE = True
+FORCE_RECOMPUTE = False
 
 
 def sanitize(s: str) -> str:
     return s.strip().lower().replace(",", "").replace("[","").replace("]","").replace("'","").replace('"',"")
+
+
+def _cache_path(name: str) -> str:
+    return os.path.join(CACHE_DIR, f"{name}.pkl")
+
+
+def load_cache(name: str):
+    path = _cache_path(name)
+    if not USE_CACHE or FORCE_RECOMPUTE or not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def save_cache(name: str, obj) -> None:
+    if not USE_CACHE:
+        return
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_cache_path(name), "wb") as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def get_or_build_cached(name: str, builder):
+    cached = load_cache(name)
+    if cached is not None:
+        print(f"Loaded cache: {name}")
+        return cached
+    value = builder()
+    save_cache(name, value)
+    print(f"Saved cache: {name}")
+    return value
 
 def get_video_ids() -> tuple:
     metadata = pd.read_excel(METADATA_FILENAME)
@@ -57,9 +93,9 @@ def split_video_ids(video_ids: list) -> tuple:
 
 def get_video_frames(video_id: str) -> list:
     frames = list()
-    i = 0
+    i = 1
     while True:
-        filename = f"{VIDEO_DIRECTORY}/{video_id}_t{i:6d}.jpg"
+        filename = f"{VIDEO_DIRECTORY}/{video_id}/{video_id}_t{i:06d}.jpg"
         if not os.path.exists(filename):
             break
         frames.append(filename)
@@ -70,18 +106,35 @@ def run_limb_tracking(frame_paths: list, animal: str) -> np.ndarray:
     # array dims: (T, L, 2) where T is number of frames, L is number of limbs, and 2 is (x,y) coordinates
     out = list()
     for frame_path in frame_paths:
-        poses = limb_tracking.infer(
+        poses = infer(
             model_name="hrnet",
             checkpoint="limb_tracking/results/hrnet_best.pth",
             image_path=frame_path,
         )
-        poses = np.array(poses)
-        out.append(poses)
+        poses = np.asarray(poses, dtype=np.float32)
 
-    out = np.array(out)
-    return out
+        # If multiple animals are returned, keep one pose track for this frame.
+        if poses.ndim == 3:
+            poses = poses[0]
+
+        if poses.ndim != 2 or poses.shape[0] == 0:
+            continue
+
+        standardized = np.zeros((NUM_LIMBS, 2), dtype=np.float32)
+        n = min(NUM_LIMBS, poses.shape[0])
+        standardized[:n, :] = poses[:n, :2]
+        out.append(standardized)
+
+    if not out:
+        return np.empty((0, NUM_LIMBS, 2), dtype=np.float32)
+
+    return np.asarray(out, dtype=np.float32)
 
 def normalize_frames(frames: np.ndarray, animal: str, behavior: str) -> np.ndarray:
+    if len(frames) == 0:
+        # Fallback so downstream normalization and batching can proceed.
+        frames = np.zeros((FRAMES_PER_VIDEO, NUM_LIMBS, 2), dtype=np.float32)
+
     # normalize the number of frames to FRAMES_PER_VIDEO by sampling or padding
     if len(frames) > FRAMES_PER_VIDEO: # to many frames
         indices = np.linspace(0, len(frames) - 1, FRAMES_PER_VIDEO).astype(int)
@@ -212,8 +265,8 @@ def train_model(train_data: list, validation_data: list):
             val_acc_history.append(val_acc)
 
     results = {
-        "train_acc": train_acc_history / len(train_data),
-        "val_acc": val_acc_history / len(validation_data)
+        "train_acc": float(np.mean(train_acc_history)) if train_acc_history else 0.0,
+        "val_acc": float(np.mean(val_acc_history)) if val_acc_history else 0.0
     }
 
     return model, results
@@ -231,19 +284,37 @@ def test_model(model, test_data: list) -> dict:
     return {"test_acc": test_acc}
 
 def run():
-    start = time.time()
+    start = time()
     video_ids = get_video_ids()
     train_video_ids, validation_test_video_ids, test_video_ids = split_video_ids(video_ids)
 
     # preprocessing data and running limb-tracking inference
-    train_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in train_video_ids]
-    validation_test_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in validation_test_video_ids]
-    test_video_as_frames = [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in test_video_ids]
-    train_vidoes_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in train_video_as_frames]
-    validation_test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in validation_test_video_as_frames]
-    test_videos_as_limbs = [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames]
-    test_videos_as_limbs = [(run_limb_tracking(frame_paths, animal), animal, behavior) for frame_paths, animal, behavior in test_video_as_frames]
+    train_video_as_frames = get_or_build_cached(
+        "train_video_as_frames",
+        lambda: [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in train_video_ids],
+    )
+    validation_test_video_as_frames = get_or_build_cached(
+        "validation_test_video_as_frames",
+        lambda: [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in validation_test_video_ids],
+    )
+    test_video_as_frames = get_or_build_cached(
+        "test_video_as_frames",
+        lambda: [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in test_video_ids],
+    )
+    train_vidoes_as_limbs = get_or_build_cached(
+        "train_videos_as_limbs",
+        lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in train_video_as_frames],
+    )
+    validation_test_videos_as_limbs = get_or_build_cached(
+        "validation_test_videos_as_limbs",
+        lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in validation_test_video_as_frames],
+    )
+    test_videos_as_limbs = get_or_build_cached(
+        "test_videos_as_limbs",
+        lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames],
+    )
 
+    print(f"train videos as limbs len: {len(train_vidoes_as_limbs)}, validation/test videos as limbs len: {len(validation_test_videos_as_limbs)}, test videos as limbs len: {len(test_videos_as_limbs)}")
     train_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in train_vidoes_as_limbs]
     validation_test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in validation_test_videos_as_limbs]
     test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in test_videos_as_limbs]

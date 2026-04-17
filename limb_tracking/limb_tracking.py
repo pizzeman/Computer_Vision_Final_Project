@@ -962,39 +962,39 @@ def infer(model_name: str, checkpoint: str, image_path: str,
     hmaps  = (out[0] if model_name == "dekr" else out).squeeze(0).cpu().numpy()
     coords = heatmaps_to_coords(hmaps)
 
-    print(f"\n{'#':<4} {'Joint':<20} {'x':>6} {'y':>6}")
-    print("-" * 40)
-    for j, (x, y) in enumerate(coords):
-        print(f"{j:<4} {JOINT_NAMES[j]:<20} {x:6.1f} {y:6.1f}")
+    # print(f"\n{'#':<4} {'Joint':<20} {'x':>6} {'y':>6}")
+    # print("-" * 40)
+    # for j, (x, y) in enumerate(coords):
+    #     print(f"{j:<4} {JOINT_NAMES[j]:<20} {x:6.1f} {y:6.1f}")
 
     h, w       = resized.shape[:2]
     hm_h, hm_w = HEATMAP_SIZE
-    pts = coords.copy()
-    pts[:, 0] *= w / hm_w
-    pts[:, 1] *= h / hm_h
+    # pts = coords.copy()
+    # pts[:, 0] *= w / hm_w
+    # pts[:, 1] *= h / hm_h
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    axes[0].imshow(resized)
-    axes[0].set_title(f"{model_name.upper()} — Pose", fontsize=12, fontweight="bold")
-    axes[0].axis("off")
-    cmap_sk = plt.cm.get_cmap("hsv", len(SKELETON))
-    for k, (i, j) in enumerate(SKELETON):
-        axes[0].plot([pts[i, 0], pts[j, 0]], [pts[i, 1], pts[j, 1]],
-                     "-", color=cmap_sk(k), linewidth=2.0, alpha=0.85)
-    cmap_jt = plt.cm.get_cmap("tab20", NUM_JOINTS)
-    for j in range(NUM_JOINTS):
-        axes[0].scatter(pts[j, 0], pts[j, 1], c=[cmap_jt(j)],
-                        s=45, zorder=5, edgecolors="white", linewidths=0.6)
-    axes[1].axis("off")
-    axes[1].legend(
-        handles=[mpatches.Patch(color=cmap_jt(j), label=f"{j}: {JOINT_NAMES[j]}")
-                 for j in range(NUM_JOINTS)],
-        loc="upper left", fontsize=7, ncol=2, frameon=True, title="Joints"
-    )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Pose overlay -> {output_path}")
+    # fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # axes[0].imshow(resized)
+    # axes[0].set_title(f"{model_name.upper()} — Pose", fontsize=12, fontweight="bold")
+    # axes[0].axis("off")
+    # cmap_sk = plt.cm.get_cmap("hsv", len(SKELETON))
+    # for k, (i, j) in enumerate(SKELETON):
+    #     axes[0].plot([pts[i, 0], pts[j, 0]], [pts[i, 1], pts[j, 1]],
+    #                  "-", color=cmap_sk(k), linewidth=2.0, alpha=0.85)
+    # cmap_jt = plt.cm.get_cmap("tab20", NUM_JOINTS)
+    # for j in range(NUM_JOINTS):
+    #     axes[0].scatter(pts[j, 0], pts[j, 1], c=[cmap_jt(j)],
+    #                     s=45, zorder=5, edgecolors="white", linewidths=0.6)
+    # axes[1].axis("off")
+    # axes[1].legend(
+    #     handles=[mpatches.Patch(color=cmap_jt(j), label=f"{j}: {JOINT_NAMES[j]}")
+    #              for j in range(NUM_JOINTS)],
+    #     loc="upper left", fontsize=7, ncol=2, frameon=True, title="Joints"
+    # )
+    # fig.tight_layout()
+    # fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    # plt.close(fig)
+    # print(f"Pose overlay -> {output_path}")
     return coords
 
 
