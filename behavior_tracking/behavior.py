@@ -14,8 +14,7 @@ METADATA_FILENAME = "/Users/cwise/Downloads/AR_metadata.xlsx"
 VIDEO_DIRECTORY = "/Users/cwise/Downloads/image"
 ANIMALS = ["horse", "frog", "lion", "common crane"]
 BEHAVIORS = ["running", "fighting", "drinking", "sleeping", "playing"]
-VALIDATION_RATIO = 0.1
-TEST_RATIO = 0.2
+TEST_RATIO = 0.3
 FRAME_SIZE = (224, 224)
 FRAMES_PER_VIDEO = 16
 LEARNING_RATE = 1e-3
@@ -83,12 +82,12 @@ def get_video_ids() -> tuple:
     return video_ids
 
 def split_video_ids(video_ids: list) -> tuple:
-    n_test = int(len(video_ids) * TEST_RATIO)
-    n_validation = int(len(video_ids) * VALIDATION_RATIO)
-    validation_test_ids = video_ids[:n_validation + n_test]
-    test_video_ids = video_ids[n_validation:n_validation + n_test]
-    train_video_ids = video_ids[n_validation + n_test:]
-    return train_video_ids, validation_test_ids, test_video_ids
+    video_ids_shuffled = video_ids.copy()
+    np.random.shuffle(video_ids_shuffled)
+    n_test = int(len(video_ids_shuffled) * TEST_RATIO)
+    test_video_ids = video_ids_shuffled[:n_test]
+    train_video_ids = video_ids_shuffled[n_test:]
+    return train_video_ids, test_video_ids
 
 
 def get_video_frames(video_id: str) -> list:
@@ -271,31 +270,16 @@ def train_model(train_data: list, validation_data: list):
 
     return model, results
 
-def test_model(model, test_data: list) -> dict:
-    # test_data is a list of (features, animal, label_idx) where features is (T, F_total) and label_idx is an int
-    device = get_device()
-    model.eval()
-    with torch.no_grad():
-        test_frames = torch.tensor([item[0] for item in test_data], dtype=torch.float32).to(device)
-        test_labels = torch.tensor([item[2] for item in test_data], dtype=torch.long).to(device)
-        test_outputs = model(test_frames)
-        test_acc = (test_outputs.argmax(dim=1) == test_labels).float().mean().item()
-
-    return {"test_acc": test_acc}
 
 def run():
     start = time()
     video_ids = get_video_ids()
-    train_video_ids, validation_test_video_ids, test_video_ids = split_video_ids(video_ids)
+    train_video_ids, test_video_ids = split_video_ids(video_ids)
 
     # preprocessing data and running limb-tracking inference
     train_video_as_frames = get_or_build_cached(
         "train_video_as_frames",
         lambda: [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in train_video_ids],
-    )
-    validation_test_video_as_frames = get_or_build_cached(
-        "validation_test_video_as_frames",
-        lambda: [(get_video_frames(video_id), animal, behavior) for video_id, animal, behavior in validation_test_video_ids],
     )
     test_video_as_frames = get_or_build_cached(
         "test_video_as_frames",
@@ -305,32 +289,21 @@ def run():
         "train_videos_as_limbs",
         lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in train_video_as_frames],
     )
-    validation_test_videos_as_limbs = get_or_build_cached(
-        "validation_test_videos_as_limbs",
-        lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in validation_test_video_as_frames],
-    )
     test_videos_as_limbs = get_or_build_cached(
         "test_videos_as_limbs",
         lambda: [(np.array(run_limb_tracking(frames, animal)), animal, behavior) for frames, animal, behavior in test_video_as_frames],
     )
 
-    print(f"train videos as limbs len: {len(train_vidoes_as_limbs)}, validation/test videos as limbs len: {len(validation_test_videos_as_limbs)}, test videos as limbs len: {len(test_videos_as_limbs)}")
     train_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in train_vidoes_as_limbs]
-    validation_test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in validation_test_videos_as_limbs]
     test_videos_normalized = [normalize_frames(frames, animal, behavior) for frames, animal, behavior in test_videos_as_limbs]
 
     train_videos_features = [flatten_frame_features(frames) for frames in train_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
-    validation_videos_features = [flatten_frame_features(frames) for frames in validation_test_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
     test_videos_features = [flatten_frame_features(frames) for frames in test_videos_normalized]  # (T, L, F_aug) -> (T, F_total)
 
     # Build canonical supervised samples: (features, animal, behavior_class_index).
     train_data = [
         (frames, animal, BEHAVIORS.index(behavior))
         for frames, (_, animal, behavior) in zip(train_videos_features, train_vidoes_as_limbs)
-    ]
-    validation_data = [
-        (frames, animal, BEHAVIORS.index(behavior))
-        for frames, (_, animal, behavior) in zip(validation_videos_features, validation_test_videos_as_limbs)
     ]
     test_data = [
         (frames, animal, BEHAVIORS.index(behavior))
@@ -340,14 +313,9 @@ def run():
     print(f"Data preprocessing and limb tracking done at {time() - start:.2f} seconds")
 
     # train the model 
-    model, train_results = train_model(train_data, validation_data)
+    model, train_results = train_model(train_data, test_data)
     print(train_results)
     print(f"Model training done at {time() - start:.2f} seconds")
-
-    # evaluate the model
-    test_results = test_model(model, test_data)
-    print(test_results)
-    print(f"Model testing done at {time() - start:.2f} seconds")
 
     # save the model
     torch.save(model.state_dict(), "behavior_cnn.pth")
