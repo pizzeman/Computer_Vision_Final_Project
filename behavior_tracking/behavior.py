@@ -13,7 +13,7 @@ from limb_tracking.limb_tracking import infer
 METADATA_FILENAME = os.path.expanduser("~/Downloads/AR_metadata.xlsx")
 VIDEO_DIRECTORY = os.path.expanduser("~/Downloads/image")
 ANIMALS = ["horse", "frog", "lion", "common crane"]
-BEHAVIORS = ["running", "fighting", "drinking", "sleeping", "playing"]
+BEHAVIORS = ["attending", "eating", "keeping still", "walking", "sleeping"]
 TEST_RATIO = 0.3
 FRAME_SIZE = (224, 224)
 FRAMES_PER_VIDEO = 16
