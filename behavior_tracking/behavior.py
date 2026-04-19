@@ -10,8 +10,8 @@ import torch.nn.functional as F
 
 from limb_tracking.limb_tracking import infer
 
-METADATA_FILENAME = "/Users/cwise/Downloads/AR_metadata.xlsx"
-VIDEO_DIRECTORY = "/Users/cwise/Downloads/image"
+METADATA_FILENAME = os.path.expanduser("~/Downloads/AR_metadata.xlsx")
+VIDEO_DIRECTORY = os.path.expanduser("~/Downloads/image")
 ANIMALS = ["horse", "frog", "lion", "common crane"]
 BEHAVIORS = ["running", "fighting", "drinking", "sleeping", "playing"]
 TEST_RATIO = 0.3
@@ -165,11 +165,9 @@ def normalize_frames(frames: np.ndarray, animal: str, behavior: str) -> np.ndarr
 
     # add one-hot encoding for animal and behavior
     animal_onehot = list_to_onehot(ANIMALS, animal)  # (len(ANIMALS),)
-    behavior_onehot = list_to_onehot(BEHAVIORS, behavior)  # (len(BEHAVIORS),)
-    onehot = np.concatenate([animal_onehot, behavior_onehot])  # (len(ANIMALS) + len(BEHAVIORS),)
-    onehot = np.tile(onehot, (frames.shape[0], 1))  # (T, len(ANIMALS) + len(BEHAVIORS))
-    onehot = np.repeat(onehot[:, None, :], frames.shape[1], axis=1)  # (T, L, len(ANIMALS) + len(BEHAVIORS))
-    frames = np.concatenate([frames, onehot], axis=2)  # (T, L, 4 + len(ANIMALS) + len(BEHAVIORS)) after appending metadata
+    onehot = np.tile(animal_onehot, (frames.shape[0], 1))  # (T, len(ANIMALS))
+    onehot = np.repeat(onehot[:, None, :], frames.shape[1], axis=1)  # (T, L, len(ANIMALS))
+    frames = np.concatenate([frames, onehot], axis=2)  # (T, L, 4 + len(ANIMALS)) after appending metadata
 
     return frames
 
@@ -235,7 +233,6 @@ def train_model(train_data: list, validation_data: list):
     criterion = nn.CrossEntropyLoss()
 
     train_acc_history = []
-    val_acc_history = []
     for epoch in range(EPOCHS):
         model.train()
         np.random.shuffle(train_data)
@@ -255,17 +252,16 @@ def train_model(train_data: list, validation_data: list):
             optimizer.step()
             train_acc_history.append((outputs.argmax(dim=1) == labels_tensor).float().mean().item())
 
-        with torch.no_grad():
-            model.eval()
-            val_frames = torch.tensor([item[0] for item in validation_data], dtype=torch.float32).to(device)
-            val_labels = torch.tensor([item[2] for item in validation_data], dtype=torch.long).to(device)
-            val_outputs = model(val_frames)
-            val_acc = (val_outputs.argmax(dim=1) == val_labels).float().mean().item()
-            val_acc_history.append(val_acc)
+    with torch.no_grad():
+        model.eval()
+        val_frames = torch.tensor([item[0] for item in validation_data], dtype=torch.float32).to(device)
+        val_labels = torch.tensor([item[2] for item in validation_data], dtype=torch.long).to(device)
+        val_outputs = model(val_frames)
+        val_acc = (val_outputs.argmax(dim=1) == val_labels).float().mean().item()
 
     results = {
         "train_acc": float(np.mean(train_acc_history)) if train_acc_history else 0.0,
-        "val_acc": float(np.mean(val_acc_history)) if val_acc_history else 0.0
+        "val_acc": float(val_acc)
     }
 
     return model, results
@@ -318,8 +314,29 @@ def run():
     print(f"Model training done at {time() - start:.2f} seconds")
 
     # save the model
-    torch.save(model.state_dict(), "behavior_cnn.pth")
+    os.makedirs("behavior_tracking/results", exist_ok=True)
+    torch.save(model.state_dict(), "behavior_tracking/results/behavior_cnn.pth")
     print(f"Model saved at {time() - start:.2f} seconds")
+
+def behavior_inference(video_id: str, animal: str) -> str:
+    frame_paths = get_video_frames(video_id)
+    limb_frames = run_limb_tracking(frame_paths, animal)
+    normalized_frames = normalize_frames(limb_frames, animal, behavior=None)
+    features = flatten_frame_features(normalized_frames)
+
+    device = get_device()
+    input_dim = features.shape[1]
+    model = BehaviorCNN(input_dim=input_dim, num_classes=len(BEHAVIORS)).to(device)
+    model.load_state_dict(torch.load("behavior_tracking/results/behavior_cnn.pth", map_location=device))
+    model.eval()
+
+    with torch.no_grad():
+        features_tensor = torch.tensor(features[None, :, :], dtype=torch.float32).to(device)  # (1, T, F_total)
+        outputs = model(features_tensor)  # (1, num_classes)
+        predicted_index = outputs.argmax(dim=1).item()
+        predicted_behavior = BEHAVIORS[predicted_index]
+
+    return predicted_behavior
 
 if __name__ == "__main__":
     run()
