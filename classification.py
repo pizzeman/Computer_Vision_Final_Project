@@ -1,17 +1,14 @@
 """
 Animal Classifier using Ultralytics YOLO + SVM
 -----------------------------------------------
-YOLO detects animals, SVM classifies each detection.
+YOLO detects animals, SVM classifies each detection. Compare SVM to ResNet
 
 Requirements:
-    pip install ultralytics opencv-python scikit-learn joblib torch torchvision
+    pip install tqdm opencv-python numpy torch torchvision joblib scikit-learn ultralytics
 
 Usage:
-    # Train SVM:
-    python sheep_counter.py --image path/to/image.jpg --train --labeled_dir path/to/labeled_dir
-
-    # Inference:
-    python sheep_counter.py --image path/to/image.jpg --show
+    1. Example command to run in terminal (includes training of ResNet):
+        python classification.py --image random_images/multiple_sheep.jpg --train --model resnet --show
 """
 
 import argparse
@@ -201,15 +198,32 @@ def build_resnet(num_classes: int) -> nn.Module:
     )
     return resnet
  
-def test_resnet(
-        model,
-        labeled_dir: str
-): 
+def test_resnet(model: nn.Module, labeled_dir: str):
+    """Evaluate a loaded ResNet model on the test split."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+
     paths, labels, classes = _collect_image_paths(labeled_dir)
     idx = list(range(len(paths)))
-    train_idx, temp_idx = train_test_split(idx, test_size=0.3, stratify=labels)
+    _, temp_idx = train_test_split(idx, test_size=0.3, stratify=labels)
     temp_labels = [labels[i] for i in temp_idx]
-    val_idx, test_idx = train_test_split(temp_idx, test_size=0.5, stratify=temp_labels)
+    _, test_idx = train_test_split(temp_idx, test_size=0.5, stratify=temp_labels)
+
+    test_paths  = [paths[i] for i in test_idx]
+    test_labels = [labels[i] for i in test_idx]
+    test_dataset = CropDataset(test_paths, test_labels, transform=RESNET_TRANSFORMS["val"])
+    test_loader  = DataLoader(test_dataset, batch_size=32)
+
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for imgs, lbls in tqdm(test_loader, desc="Evaluating"):
+            imgs = imgs.to(device)
+            preds = model(imgs).argmax(dim=1).cpu().tolist()
+            all_preds.extend(preds)
+            all_labels.extend(lbls.tolist())
+
+    print(classification_report(all_labels, all_preds, target_names=classes))
  
 def train_resnet(
     labeled_dir: str,
@@ -317,11 +331,11 @@ def classify_crop_resnet(crop: np.ndarray, resnet: nn.Module, classes: list, dev
 def detect_and_classify(
     image_path: str,
     model: YOLO,
-    clf=None,
+    clf=None,   
     classes=None,
     resnet=None,
     resnet_classes=None,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = torch.device("cpu")
 ) -> dict:
     """
     Run YOLO detection, classify each crop with SVM or ResNet.
@@ -397,7 +411,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5,
                     help="Training epochs (ResNet only). Default: 5")
     parser.add_argument("--train", action="store_true",
-                        help="Train SVM on labeled_dir before running inference.")
+                        help="Train model on labeled_dir before running inference.")
     parser.add_argument("--labeled_dir", type=str,
                         help="Path to labeled crop directory (required if --train).")
     parser.add_argument("--model_path", type=str,
@@ -409,7 +423,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[*] Using device: {device}")
+    if device.type == "cuda":
+        print(f"[*] GPU: {torch.cuda.get_device_name(0)}")
+        print(f"[*] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     model = load_model(conf_threshold=args.conf)
 
     clf = classes = resnet = resnet_classes = None
