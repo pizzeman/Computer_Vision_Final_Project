@@ -189,30 +189,43 @@ def flatten_frame_features(frames: np.ndarray) -> np.ndarray:
 
 
 class BehaviorCNN(nn.Module):
-    def __init__(self, input_dim, num_classes):
+    def __init__(self, input_dim, num_animals=len(ANIMALS), num_classes=len(BEHAVIORS)):
         super().__init__()
 
-        self.conv1 = nn.Conv1d(input_dim, 64, kernel_size=5, padding=2)
+        self.conv1 = nn.Conv1d(input_dim, 64, kernel_size=7, padding=3)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.pool1 = nn.MaxPool1d(2)
+
         self.conv2 = nn.Conv1d(64, 128, kernel_size=5, padding=2)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.pool2 = nn.MaxPool1d(2)
+
         self.conv3 = nn.Conv1d(128, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(128)
 
-        self.pool = nn.AdaptiveAvgPool1d(1)  # collapse time
+        self.dropout = nn.Dropout(0.3)
 
-        self.fc = nn.Linear(128, num_classes)
+        self.fc1 = nn.Linear(128, 128)
+        self.fc2 = nn.Linear(128, num_classes)
 
     def forward(self, x):
         # x: (batch, T, F)
-        x = x.permute(0, 2, 1)  # → (batch, F, T)
+        x = x.permute(0, 2, 1)
 
-        x = F.relu(self.conv1(x))  # (batch, 64, T)
-        x = F.relu(self.conv2(x))  # (batch, 128, T)
-        x = F.relu(self.conv3(x))  # (batch, 128, T)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool1(x)
 
-        x = self.pool(x)        # → (batch, 128, 1)
-        x = x.squeeze(-1)       # → (batch, 128)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool2(x)
 
-        x = self.fc(x)          # → (batch, num_classes)
-        return x
+        x = F.relu(self.bn3(self.conv3(x)))
+
+        x = F.adaptive_avg_pool1d(x, 1).squeeze(-1)
+        x = self.dropout(x)
+
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        return self.fc2(x)
     
 
 def get_device():
