@@ -16,8 +16,8 @@ import os
 from pathlib import Path
 
 from tqdm import tqdm
-from count import annotate_and_show
-from count import count_sheep
+from classification.count import annotate_and_show
+from classification.count import count_sheep
 
 import cv2
 import numpy as np
