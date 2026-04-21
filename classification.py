@@ -8,7 +8,7 @@ Requirements:
 
 Usage:
     1. Example command to run in terminal (includes training of ResNet):
-        python classification.py --image random_images/multiple_sheep.jpg --train --model resnet --show
+        python classification.py --image random_images/multiple_sheep.jpg --train --labeled_dir "path/to/train_data" --model resnet --show
 """
 
 import argparse
@@ -410,6 +410,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--epochs", type=int, default=5,
                     help="Training epochs (ResNet only). Default: 5")
+    parser.add_argument("--confusion", action="store_true",
+                        help="Generate confusion matrix after training (ResNet only).")
     parser.add_argument("--train", action="store_true",
                         help="Train model on labeled_dir before running inference.")
     parser.add_argument("--labeled_dir", type=str,
@@ -476,8 +478,65 @@ def main() -> None:
         print(f"  Animals: {', '.join(result['labels'])}")
     print(f"{'='*40}\n")
 
+    if args.confusion and model_type == "resnet" and resnet is not None:
+        from sklearn.metrics import confusion_matrix
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        from sklearn.model_selection import GroupShuffleSplit
+        if not args.labeled_dir:
+            raise ValueError("--labeled_dir is required when using --confusion")
+
+        print("[*] Generating confusion matrix...")
+        paths, labels, _ = _collect_image_paths(args.labeled_dir)
+        video_ids = [os.path.basename(p).split("_t")[0] for p in paths]
+
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+        _, temp_idx = next(gss.split(paths, labels, groups=video_ids))
+        temp_groups = [video_ids[i] for i in temp_idx]
+        temp_labels = [labels[i] for i in temp_idx]
+
+        gss2 = GroupShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
+        _, test_idx = next(gss2.split(temp_idx, temp_labels, groups=temp_groups))
+
+        test_paths  = [paths[i]  for i in test_idx]
+        test_labels = [labels[i] for i in test_idx]
+
+        test_loader = DataLoader(
+            CropDataset(test_paths, test_labels, transform=RESNET_TRANSFORMS["val"]),
+            batch_size=64, num_workers=2, pin_memory=True,
+        )
+
+        resnet.eval()
+        all_preds, all_labels = [], []
+        with torch.no_grad():
+            for imgs, lbls in test_loader:
+                imgs = imgs.to(device)
+                with torch.amp.autocast("cuda"):
+                    preds = resnet(imgs).argmax(dim=1).cpu().tolist()
+                all_preds.extend(preds)
+                all_labels.extend(lbls.tolist())
+
+        cm = confusion_matrix(all_labels, all_preds)
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=resnet_classes,
+            yticklabels=resnet_classes,
+        )
+        plt.xlabel("Predicted")
+        plt.ylabel("Actual")
+        plt.title("Confusion Matrix")
+        plt.tight_layout()
+        plt.savefig("confusion_matrix.png")
+        plt.show()
+        print("[✓] Confusion matrix saved to confusion_matrix.png")
+
     if args.show:
         annotate_and_show(result, save=args.save)
+
 
 
 if __name__ == "__main__":
